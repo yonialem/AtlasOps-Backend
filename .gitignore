@@ -1,0 +1,20 @@
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dependencies & Build
+node_modules/
+dist/
+build/
+coverage/
+.npm-cache/
+
+# Git Worktrees
+.worktrees/
+
+# Logs & Environment
+*.log
+.env
+.env.local
