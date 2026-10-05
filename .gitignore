@@ -5,6 +5,7 @@ Thumbs.db
 .idea/
 
 # Dependencies & Build
+node_modules
 node_modules/
 dist/
 build/
