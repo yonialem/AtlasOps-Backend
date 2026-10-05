@@ -2,7 +2,14 @@ import {
   Incident,
   IncidentSeverity,
   IncidentStatus,
+  IncidentCreateInput,
+  IncidentStatusUpdateInput,
+  IncidentAssigneeUpdateInput,
+  IncidentNoteCreateInput,
+  IncidentNote,
+  UserSummary,
   SEVERITY_ORDER,
+  isValidStatusTransition,
 } from "../contracts/incident.types.ts";
 import {
   GetIncidentsQuery,
@@ -10,9 +17,10 @@ import {
   IncidentsListResponse,
   IncidentSortField,
   SortOrder,
+  UpdateIncidentStatusResponse,
   parseAndSanitizeQuery,
 } from "../contracts/api.types.ts";
-import { generateSeedIncidents } from "./seed.ts";
+import { generateSeedIncidents, MOCK_USERS } from "./seed.ts";
 
 /**
  * ============================================================================
@@ -20,10 +28,24 @@ import { generateSeedIncidents } from "./seed.ts";
  * ============================================================================
  * High-performance in-memory repository managing the incident lifecycle,
  * multi-value dimension filtering, full-text substring search, multi-column
- * sorting, and pagination.
+ * sorting, clamped pagination, and atomic mutations with optimistic concurrency.
  */
 
 export type SupportedSortField = IncidentSortField | "status" | "title" | "id";
+
+export type StoreErrorCode = "NOT_FOUND" | "CONFLICT" | "INVALID_TRANSITION" | "USER_NOT_FOUND";
+
+export class StoreError extends Error {
+  public readonly code: StoreErrorCode;
+  public readonly currentVersion?: number;
+
+  constructor(code: StoreErrorCode, message: string, currentVersion?: number) {
+    super(message);
+    this.name = "StoreError";
+    this.code = code;
+    this.currentVersion = currentVersion;
+  }
+}
 
 /**
  * Pure sorting function for Incident entities.
@@ -75,10 +97,14 @@ export class IncidentStore {
   }
 
   /**
-   * Returns a shallow copy of all incidents currently in the store.
+   * Returns a deep defensive copy of all incidents currently in the store
+   * so external consumers cannot accidentally mutate internal state.
    */
   public getAll(): Incident[] {
-    return [...this.incidents];
+    return this.incidents.map((inc) => ({
+      ...inc,
+      notes: [...inc.notes],
+    }));
   }
 
   /**
@@ -101,6 +127,168 @@ export class IncidentStore {
    */
   public reset(seed?: number): void {
     this.incidents = generateSeedIncidents(seed);
+  }
+
+  /**
+   * Determines the next sequential incident ID starting after the seed range (e.g. INC-2049).
+   */
+  private getNextIncidentId(): string {
+    let maxNum = 2048;
+    for (const inc of this.incidents) {
+      const match = inc.id.match(/^INC-(\d+)$/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNum) maxNum = num;
+      }
+    }
+    return `INC-${maxNum + 1}`;
+  }
+
+  /**
+   * Creates a new incident with next sequential ID, version 1, and empty notes.
+   */
+  public create(input: IncidentCreateInput): Incident {
+    const id = this.getNextIncidentId();
+    let assignee: UserSummary | null = null;
+    if (input.assigneeId) {
+      const user = MOCK_USERS.find((u) => u.id === input.assigneeId);
+      if (user) {
+        assignee = user;
+      }
+    }
+
+    const now = new Date().toISOString();
+    const incident: Incident = {
+      id,
+      title: input.title,
+      description: input.description,
+      status: input.status,
+      severity: input.severity,
+      service: input.service,
+      assignee,
+      createdAt: now,
+      updatedAt: now,
+      version: 1,
+      notes: [],
+    };
+
+    this.incidents.push(incident);
+    return incident;
+  }
+
+  /**
+   * Updates incident status with lifecycle transition validation and optimistic concurrency.
+   * Throws StoreError on validation or concurrency failure.
+   */
+  public updateStatus(
+    id: string,
+    input: IncidentStatusUpdateInput
+  ): UpdateIncidentStatusResponse {
+    const incident = this.findById(id);
+    if (!incident) {
+      throw new StoreError("NOT_FOUND", "The requested incident does not exist.");
+    }
+
+    if (input.version !== undefined && input.version !== incident.version) {
+      throw new StoreError(
+        "CONFLICT",
+        "The incident was changed by another user.",
+        incident.version
+      );
+    }
+
+    if (!isValidStatusTransition(incident.status, input.status)) {
+      throw new StoreError(
+        "INVALID_TRANSITION",
+        `Cannot transition incident directly from '${incident.status}' to '${input.status}'.`
+      );
+    }
+
+    incident.status = input.status;
+    incident.version += 1;
+    incident.updatedAt = new Date().toISOString();
+
+    return {
+      id: incident.id,
+      status: incident.status,
+      updatedAt: incident.updatedAt,
+      version: incident.version,
+    };
+  }
+
+  /**
+   * Updates or unassigns incident owner with optimistic concurrency checks.
+   * Throws StoreError on validation or concurrency failure.
+   */
+  public updateAssignee(
+    id: string,
+    input: IncidentAssigneeUpdateInput & { version?: number }
+  ): Incident {
+    const incident = this.findById(id);
+    if (!incident) {
+      throw new StoreError("NOT_FOUND", "The requested incident does not exist.");
+    }
+
+    if (input.version !== undefined && input.version !== incident.version) {
+      throw new StoreError(
+        "CONFLICT",
+        "The incident was changed by another user.",
+        incident.version
+      );
+    }
+
+    if (input.assigneeId === null) {
+      incident.assignee = null;
+    } else if (typeof input.assigneeId === "string") {
+      const user = MOCK_USERS.find((u) => u.id === input.assigneeId);
+      if (!user) {
+        throw new StoreError("USER_NOT_FOUND", "The specified assignee does not exist.");
+      }
+      incident.assignee = user;
+    }
+
+    incident.version += 1;
+    incident.updatedAt = new Date().toISOString();
+
+    return incident;
+  }
+
+  /**
+   * Appends an investigation note to an existing incident and updates its updatedAt timestamp.
+   * Throws StoreError if incident is not found.
+   */
+  public createNote(
+    id: string,
+    input: IncidentNoteCreateInput & { authorId?: string }
+  ): IncidentNote {
+    const incident = this.findById(id);
+    if (!incident) {
+      throw new StoreError("NOT_FOUND", "The requested incident does not exist.");
+    }
+
+    let author = MOCK_USERS[0]; // Default: Maya Chen
+    if (input.authorId) {
+      const matched = MOCK_USERS.find((u) => u.id === input.authorId);
+      if (matched) {
+        author = matched;
+      }
+    }
+
+    const noteId = `note-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const now = new Date().toISOString();
+
+    const note: IncidentNote = {
+      id: noteId,
+      incidentId: incident.id,
+      author,
+      message: input.message.trim(),
+      createdAt: now,
+    };
+
+    incident.notes.push(note);
+    incident.updatedAt = now;
+
+    return note;
   }
 
   /**

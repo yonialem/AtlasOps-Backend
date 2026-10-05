@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { Readable, Writable } from "node:stream";
 import {
   IncidentStore,
   store,
   sortIncidents,
 } from "../src/db/store.ts";
-import { app, server } from "../src/index.ts";
+import { app } from "../src/index.ts";
 import {
   Incident,
   IncidentSchema,
@@ -19,6 +20,64 @@ import {
   ApiErrorEnvelope,
   parseAndSanitizeQuery,
 } from "../src/contracts/api.types.ts";
+
+import http from "node:http";
+import { Socket } from "node:net";
+
+function dispatchRequest(
+  expressApp: any,
+  method: string,
+  url: string,
+  body?: unknown,
+  headers: Record<string, string> = {}
+): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    const socket = new Socket();
+    const req = new http.IncomingMessage(socket);
+    req.method = method.toUpperCase();
+    req.url = url;
+    const bodyStr = body !== undefined ? JSON.stringify(body) : "";
+    req.headers = {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(bodyStr).toString(),
+      ...headers,
+    };
+
+    const res = new http.ServerResponse(req);
+    res.assignSocket(socket as any);
+
+    const chunks: Buffer[] = [];
+    socket.write = (chunk: any, encoding?: any, cb?: any) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      if (typeof encoding === "function") encoding();
+      else if (typeof cb === "function") cb();
+      return true;
+    };
+
+    res.on("finish", () => {
+      const fullText = Buffer.concat(chunks).toString("utf8");
+      const splitIdx = fullText.indexOf("\r\n\r\n");
+      const bodyText = splitIdx !== -1 ? fullText.slice(splitIdx + 4) : fullText;
+      let parsed = bodyText;
+      try {
+        parsed = JSON.parse(bodyText);
+      } catch {}
+      resolve({ status: res.statusCode, body: parsed });
+    });
+
+    res.on("error", reject);
+
+    expressApp(req, res, (err: any) => {
+      if (err) reject(err);
+      else resolve({ status: 404, body: { code: "NOT_FOUND", message: "Not Found" } });
+    });
+
+    if (bodyStr) {
+      req.push(bodyStr);
+    }
+    req.push(null);
+  });
+}
 
 /**
  * ============================================================================
@@ -489,28 +548,10 @@ describe("TASK-BE-003: Entity Lookup & Store Lifecycle (TEST-STORE-011, TEST-STO
 });
 
 describe("TASK-BE-003: HTTP Route Integration (TEST-STORE-014)", () => {
-  let baseUrl: string;
-
-  beforeAll(async () => {
-    const addr = server.address();
-    if (typeof addr === "object" && addr !== null) {
-      baseUrl = `http://127.0.0.1:${addr.port}`;
-    } else {
-      baseUrl = "http://127.0.0.1:3001";
-    }
-  });
-
-  afterAll(async () => {
-    if (server && server.listening) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-
   it("TEST-STORE-014-A: GET /api/incidents returns HTTP 200 with IncidentsListResponse", async () => {
-    const res = await fetch(`${baseUrl}/api/incidents`);
-    expect(res.status).toBe(200);
+    const { status, body } = await dispatchRequest(app, "GET", "/api/incidents");
+    expect(status).toBe(200);
 
-    const body = (await res.json()) as IncidentsListResponse;
     expect(() => IncidentsListResponseSchema.parse(body)).not.toThrow();
     expect(body.page).toBe(1);
     expect(body.pageSize).toBe(25);
@@ -520,10 +561,13 @@ describe("TASK-BE-003: HTTP Route Integration (TEST-STORE-014)", () => {
   });
 
   it("TEST-STORE-014-B: GET /api/incidents forwards query parameters (status, severity, pageSize)", async () => {
-    const res = await fetch(`${baseUrl}/api/incidents?status=triggered&severity=critical&pageSize=10`);
-    expect(res.status).toBe(200);
+    const { status, body } = await dispatchRequest(
+      app,
+      "GET",
+      "/api/incidents?status=triggered&severity=critical&pageSize=10"
+    );
+    expect(status).toBe(200);
 
-    const body = (await res.json()) as IncidentsListResponse;
     expect(body.pageSize).toBe(10);
     expect(body.items.length).toBeLessThanOrEqual(10);
 
@@ -534,19 +578,17 @@ describe("TASK-BE-003: HTTP Route Integration (TEST-STORE-014)", () => {
   });
 
   it("TEST-STORE-014-C: GET /api/incidents/:id returns HTTP 200 with Incident for existing record", async () => {
-    const res = await fetch(`${baseUrl}/api/incidents/INC-1001`);
-    expect(res.status).toBe(200);
+    const { status, body } = await dispatchRequest(app, "GET", "/api/incidents/INC-1001");
+    expect(status).toBe(200);
 
-    const body = (await res.json()) as Incident;
     expect(() => IncidentSchema.parse(body)).not.toThrow();
     expect(body.id).toBe("INC-1001");
   });
 
   it("TEST-STORE-014: GET /api/incidents/:id returns HTTP 404 with ApiErrorEnvelope on missing ID", async () => {
-    const res = await fetch(`${baseUrl}/api/incidents/INC-9999`);
-    expect(res.status).toBe(404);
+    const { status, body } = await dispatchRequest(app, "GET", "/api/incidents/INC-9999");
+    expect(status).toBe(404);
 
-    const body = (await res.json()) as ApiErrorEnvelope;
     expect(() => ApiErrorEnvelopeSchema.parse(body)).not.toThrow();
     expect(body.code).toBe("INCIDENT_NOT_FOUND");
     expect(body.message).toBe("The requested incident does not exist.");
