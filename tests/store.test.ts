@@ -594,3 +594,127 @@ describe("TASK-BE-003: HTTP Route Integration (TEST-STORE-014)", () => {
     expect(body.message).toBe("The requested incident does not exist.");
   });
 });
+
+describe("TASK-BE-007: IncidentStore Query Engine Contract Matrix (TEST-BE-001 through TEST-BE-006)", () => {
+  beforeEach(() => {
+    store.reset();
+  });
+
+  it("TEST-BE-001: multi-field search q matches across id, title, service, and assignee name", () => {
+    // Search by service substring
+    const resPayments = store.query({ q: "payments" });
+    expect(resPayments.total).toBeGreaterThan(0);
+    for (const item of resPayments.items) {
+      const match =
+        item.service.toLowerCase().includes("payments") ||
+        item.title.toLowerCase().includes("payments") ||
+        item.id.toLowerCase().includes("payments") ||
+        (item.assignee !== null && item.assignee.name.toLowerCase().includes("payments"));
+      expect(match).toBe(true);
+    }
+
+    // Search by assignee name substring
+    const resMaya = store.query({ q: "Maya" });
+    expect(resMaya.total).toBeGreaterThan(0);
+    for (const item of resMaya.items) {
+      const match =
+        (item.assignee !== null && item.assignee.name.toLowerCase().includes("maya")) ||
+        item.title.toLowerCase().includes("maya") ||
+        item.service.toLowerCase().includes("maya") ||
+        item.id.toLowerCase().includes("maya");
+      expect(match).toBe(true);
+    }
+  });
+
+  it("TEST-BE-002: comma-separated multi-value status and severity filtering (OR logic)", () => {
+    const resStatus = store.query({ status: "triggered,investigating", pageSize: 50 });
+    expect(resStatus.total).toBeGreaterThan(0);
+    for (const item of resStatus.items) {
+      expect(["triggered", "investigating"]).toContain(item.status);
+    }
+
+    const resSeverity = store.query({ severity: "critical,high", pageSize: 50 });
+    expect(resSeverity.total).toBeGreaterThan(0);
+    for (const item of resSeverity.items) {
+      expect(["critical", "high"]).toContain(item.severity);
+    }
+  });
+
+  it("TEST-BE-003: service filtering and cross-dimension logical AND intersection", () => {
+    const res = store.query({
+      service: "payments-api,checkout-web",
+      severity: "critical",
+      pageSize: 50,
+    });
+
+    expect(res.total).toBeGreaterThan(0);
+    for (const item of res.items) {
+      expect(["payments-api", "checkout-web"]).toContain(item.service);
+      expect(item.severity).toBe("critical");
+    }
+  });
+
+  it("TEST-BE-004: severity ranking sorting (critical>high>medium>low) with direction and tie-breakers", () => {
+    // Descending severity sort
+    const resDesc = store.query({ sort: "severity", order: "desc", pageSize: 50 });
+    for (let i = 0; i < resDesc.items.length - 1; i++) {
+      const curr = SEVERITY_ORDER[resDesc.items[i].severity];
+      const next = SEVERITY_ORDER[resDesc.items[i + 1].severity];
+      expect(curr).toBeGreaterThanOrEqual(next);
+      if (curr === next) {
+        const currUpdated = new Date(resDesc.items[i].updatedAt).getTime();
+        const nextUpdated = new Date(resDesc.items[i + 1].updatedAt).getTime();
+        expect(currUpdated).toBeGreaterThanOrEqual(nextUpdated);
+      }
+    }
+
+    // Ascending severity sort
+    const resAsc = store.query({ sort: "severity", order: "asc", pageSize: 50 });
+    for (let i = 0; i < resAsc.items.length - 1; i++) {
+      const curr = SEVERITY_ORDER[resAsc.items[i].severity];
+      const next = SEVERITY_ORDER[resAsc.items[i + 1].severity];
+      expect(curr).toBeLessThanOrEqual(next);
+    }
+  });
+
+  it("TEST-BE-005: date sorting order (createdAt, updatedAt) ascending and descending", () => {
+    // CreatedAt ascending
+    const resCreatedAsc = store.query({ sort: "createdAt", order: "asc", pageSize: 50 });
+    for (let i = 0; i < resCreatedAsc.items.length - 1; i++) {
+      const curr = new Date(resCreatedAsc.items[i].createdAt).getTime();
+      const next = new Date(resCreatedAsc.items[i + 1].createdAt).getTime();
+      expect(curr).toBeLessThanOrEqual(next);
+    }
+
+    // UpdatedAt descending
+    const resUpdatedDesc = store.query({ sort: "updatedAt", order: "desc", pageSize: 50 });
+    for (let i = 0; i < resUpdatedDesc.items.length - 1; i++) {
+      const curr = new Date(resUpdatedDesc.items[i].updatedAt).getTime();
+      const next = new Date(resUpdatedDesc.items[i + 1].updatedAt).getTime();
+      expect(curr).toBeGreaterThanOrEqual(next);
+    }
+  });
+
+  it("TEST-BE-006: clamped pagination boundaries (page < 1, page > totalPages, pageSize bounds 1-100)", () => {
+    // Page < 1 clamps to 1
+    const resNegativePage = store.query({ page: -1 });
+    expect(resNegativePage.page).toBe(1);
+    expect(resNegativePage.items).toHaveLength(25);
+
+    // Page > totalPages returns empty items
+    const resOutOfBounds = store.query({ page: 999 });
+    expect(resOutOfBounds.items).toEqual([]);
+    expect(resOutOfBounds.total).toBe(1048);
+    expect(resOutOfBounds.totalPages).toBe(42);
+
+    // PageSize bounds
+    const res50 = store.query({ pageSize: 50 });
+    expect(res50.pageSize).toBe(50);
+    expect(res50.items).toHaveLength(50);
+
+    const res999 = store.query({ pageSize: 999 });
+    expect(res999.pageSize).toBe(100);
+    expect(res999.items).toHaveLength(100);
+  });
+});
+
