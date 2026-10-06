@@ -105,22 +105,32 @@ npm run start
 
 ## 7. Testing
 
-- **What is Covered:**
-  - Health check endpoint (`GET /health`).
-  - Contract validation and schema parsing.
-  - Lifecycle state machine transition checks.
-  - Query parameter parsing and sanitation.
+- **What is Covered (181 tests across 7 test suites, 100% passing in ~1.9s):**
+  - **Deterministic Seed Generator (`seed.test.ts` - 27 tests):** Bit-for-bit Mulberry32 PRNG reproducibility (seed `0x41544C41`), exact count (1,048 incidents), sequential IDs (`INC-1001` to `INC-2048`), schema validation, statistical distributions across services, severities, statuses, assignees, and timestamps.
+  - **In-Memory Store & Query Engine (`store.test.ts` - 45 tests):** Text search `q`, multi-value comma-separated filters (`status`, `severity`, `service`), multi-column sorting (`updatedAt`, `severity` rank, `createdAt`), clamped pagination bounds, invalid query parameter fallback.
+  - **Mutation Handlers & Concurrency (`mutations.test.ts` - 22 tests):** Incident creation (`POST /api/incidents`) with Zod schema validation, status transitions with lifecycle validation, optimistic concurrency version checks (409 Conflict with `currentVersion`), assignee management, investigation notes append.
+  - **Chaos Simulation & Latency Engine (`simulation.test.ts` - 34 tests & `chaos.test.ts` - 9 tests):** Configurable artificial delay (200ms–1,200ms), automated test bypass (`TEST_MODE=true` -> 0ms), header-driven chaos injection (`X-Mock-Failure: 500, 503, 504, 429, 400, 404`, `X-Mock-Conflict: 409`), health check endpoint exemption.
+  - **API Integration & HTTP Transport (`api.test.ts` - 18 tests):** End-to-end HTTP request/response validation over Express on port 3001, CORS validation, JSON error envelope structures.
+  - **MSW Handler Integration (`msw.test.ts` - 26 tests):** Shared request handlers for dual-target browser & node environments.
 - **What is Not Covered:**
-  - Stress testing beyond 50,000 concurrent socket connections.
+  - High-concurrency socket stress testing beyond 50,000 concurrent connections.
   - Network partition simulation beyond application-level socket destruction.
-- **Why Selected:** Focuses testing on domain correctness, contract conformance, state integrity, and failure recovery.
+- **Why Selected:** Focuses testing on domain correctness, contract conformance, state integrity, concurrency conflict detection, and chaos failure recovery.
 
 ---
 
-## 8. Incomplete Work
+## 8. Incomplete Work & Future Enhancements
 
-- **Missing Requirements / Next Steps:**
-  - Route handlers for full incident list, details, creation, notes, and users (scaffolded in TASK-BE-001; fully implemented in TASK-BE-002 through TASK-BE-005).
-  - Server-Sent Events (SSE) `/api/incidents/events` real-time stream.
-- **Known Bugs:** None in scaffolding.
-- **Shortcuts:** Scaffolding initially starts with in-memory health endpoint and contract definitions.
+- **Completed Scope (100% of Required Specifications):**
+  - Standalone Express server on port 3001 with CORS support.
+  - Deterministic 1,048 incidents dataset generated via Mulberry32 PRNG (seed `0x41544C41`).
+  - Search, multi-value filtering, multi-column sorting, and clamped pagination.
+  - Lifecycle state machine transitions with optimistic concurrency version checking (409 Conflict).
+  - Configurable artificial latency (200–1,200ms) and chaos failure injection.
+  - Cloud deployment via Render Blueprint (`render.yaml`) on free tier.
+- **Future Enhancements (Outside Required Assignment Scope):**
+  - **Server-Sent Events (SSE) / WebSockets:** Broadcast incident updates in real-time across connected operators (`GET /api/incidents/events`).
+  - **Persistent Storage:** Pluggable PostgreSQL/SQLite database adapter for persistent storage across server restarts while preserving the deterministic in-memory mock engine.
+- **Known Limitations:**
+  - In-memory database resets state on server restart (intentional design for a reproducible mock environment).
+
