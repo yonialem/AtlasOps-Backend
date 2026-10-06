@@ -1,5 +1,4 @@
 import express from "express";
-import cors from "cors";
 import {
   MOCK_SERVICES,
   MOCK_USERS,
@@ -21,6 +20,9 @@ import {
   simulationMiddleware,
   type SimulationConfig,
 } from "./middleware/simulation.ts";
+import { createServer, startServer } from "./server.ts";
+import { handlers } from "./msw/handlers.ts";
+import { server as mswServer } from "./msw/node.ts";
 
 function handleListServices(_req: express.Request, res: express.Response): void {
   res.json({ items: MOCK_SERVICES });
@@ -47,29 +49,14 @@ export {
   simulationMiddleware,
   healthRouter,
   incidentsRouter,
+  createServer,
+  startServer,
+  handlers,
+  mswServer,
 };
 export type { SimulationConfig };
 
-export const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-// 1. Health check endpoints: mounted BEFORE simulation middleware for zero-overhead exemption
-app.get("/health", handleHealthCheck);
-app.get("/api/health", handleHealthCheck);
-app.use("/health", healthRouter);
-app.use("/api/health", healthRouter);
-
-// 2. Simulation middleware for artificial latency & chaos failure injection
-app.use(createSimulationMiddleware());
-
-// 3. Metadata catalogue endpoints
-app.get("/api/services", handleListServices);
-app.get("/api/users", handleListUsers);
-
-// 4. Incidents domain router
-app.use("/api/incidents", incidentsRouter);
+export const app = createServer();
 
 const isTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
 const PORT = Number(process.env.PORT) || (isTest ? 0 : 3001);
